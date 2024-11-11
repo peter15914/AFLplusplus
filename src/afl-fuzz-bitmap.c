@@ -294,7 +294,8 @@ void minimize_bits(afl_state_t *afl, u8 *dst, u8 *src) {
 /* Construct a file name for a new test case, capturing the operation
    that led to its discovery. Returns a ptr to afl->describe_op_buf_256. */
 
-u8 *describe_op(afl_state_t *afl, u8 new_bits, size_t max_description_len) {
+u8 *describe_op(afl_state_t *afl, u8 new_bits, size_t max_description_len,
+                u8 really_interesting) {
 
   u8 is_timeout = 0;
 
@@ -386,7 +387,15 @@ u8 *describe_op(afl_state_t *afl, u8 new_bits, size_t max_description_len) {
 
   if (is_timeout) { strcat(ret, ",+tout"); }
 
-  if (new_bits == 2) { strcat(ret, ",+cov"); }
+  if (new_bits == 2) {
+
+    strcat(ret, ",+cov");
+
+  } else if (afl->shm.vp_mode && !really_interesting) {
+
+    strcat(ret, ",+vp");
+
+  }
 
   if (unlikely(strlen(ret) >= max_description_len))
     FATAL("describe string is too long");
@@ -523,6 +532,7 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
     if (unlikely(afl->shm.vp_mode)) {
 
       if (unlikely(afl->shm.vp_map->control[0])) {  // map updates
+
         is_really_interesting = new_bits;
         new_bits = 1;
 
@@ -546,7 +556,7 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
       queue_fn = alloc_printf(
           "%s/queue/id:%06u,%s%s%s", afl->out_dir, afl->queued_items,
           describe_op(afl, new_bits + is_timeout,
-                      NAME_MAX - strlen("id:000000,")),
+                      NAME_MAX - strlen("id:000000,"), is_really_interesting),
           afl->file_extension ? "." : "",
           afl->file_extension ? (const char *)afl->file_extension : "");
 
@@ -828,7 +838,8 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
 
         snprintf(fn, PATH_MAX, "%s/hangs/id:%06llu,%s%s%s", afl->out_dir,
                  afl->saved_hangs,
-                 describe_op(afl, 0, NAME_MAX - strlen("id:000000,")),
+                 describe_op(afl, 0, NAME_MAX - strlen("id:000000,"),
+                             is_really_interesting),
                  afl->file_extension ? "." : "",
                  afl->file_extension ? (const char *)afl->file_extension : "");
 
@@ -896,7 +907,8 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
 
         snprintf(fn, PATH_MAX, "%s/crashes/id:%06llu,sig:%02u,%s%s%s",
                  afl->out_dir, afl->saved_crashes, afl->fsrv.last_kill_signal,
-                 describe_op(afl, 0, NAME_MAX - strlen("id:000000,sig:00,")),
+                 describe_op(afl, 0, NAME_MAX - strlen("id:000000,sig:00,"),
+                             is_really_interesting),
                  afl->file_extension ? "." : "",
                  afl->file_extension ? (const char *)afl->file_extension : "");
 

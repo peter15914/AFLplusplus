@@ -1199,7 +1199,8 @@ void perform_dry_run(afl_state_t *afl) {
                 afl->out_dir, afl->saved_crashes, afl->fsrv.last_kill_signal,
                 describe_op(
                     afl, 0,
-                    NAME_MAX - strlen("id:000000,sig:00,") - strlen(use_name)),
+                    NAME_MAX - strlen("id:000000,sig:00,") - strlen(use_name),
+                    1),
                 use_name, afl->file_extension ? "." : "",
                 afl->file_extension ? (const char *)afl->file_extension : "");
 

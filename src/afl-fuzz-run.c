@@ -253,7 +253,7 @@ u32 __attribute__((hot)) write_to_testcase(afl_state_t *afl, void **mem,
   char fn[PATH_MAX];
   snprintf(fn, PATH_MAX, "%s/mutations/%09u:%s", afl->out_dir,
            afl->document_counter++,
-           describe_op(afl, 0, NAME_MAX - strlen("000000000:")));
+           describe_op(afl, 0, NAME_MAX - strlen("000000000:"), 1));
 
   if ((doc_fd = open(fn, O_WRONLY | O_CREAT | O_TRUNC, DEFAULT_PERMISSION)) >=
       0) {
@@ -522,6 +522,62 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
     memcpy(afl->first_trace, afl->fsrv.trace_bits, afl->fsrv.map_size);
     hnb = has_new_bits(afl, afl->virgin_bits);
     if (hnb > new_bits) { new_bits = hnb; }
+
+  }
+
+  if (unlikely(afl->shm.vp_mode)) {
+
+    if (afl->shm.vp_map->control[0]) {
+
+      u32 items = afl->shm.vp_map->control[0];
+      q->really_interesting = new_bits;
+
+      for (u32 item = 1; item <= items; ++item) {
+
+        u32 old, index = afl->shm.vp_map->control[item];
+        if ((old = afl->vp_ptr[index])) {  // seen before
+          // evict the old one if possible
+          if (!afl->queue_buf[old]->really_interesting) {
+
+            // candidate to evict, check if it is not the best partial solve
+            // for anything else
+            u32 n, delete = 1;
+            for (n = 0; n < VP_MAP_SIZE; ++n) {
+
+              if (unlikely(afl->vp_ptr[n] == old && n != index)) {
+
+                delete = 0;
+                break;
+
+              }
+
+            }
+
+            if (delete) {
+
+              struct queue_entry *tmpq = afl->queue_buf[old];
+              tmpq->disabled = 1;
+              --afl->active_items;
+
+              if (!tmpq->was_fuzzed) {
+
+                tmpq->was_fuzzed = 1;
+                afl->reinit_table = 1;
+                --afl->pending_not_fuzzed;
+
+              }
+
+            }
+
+          }
+
+        }
+
+        afl->vp_ptr[index] = q->id;
+
+      }
+
+    }
 
   }
 
