@@ -118,6 +118,7 @@ u32 __afl_map_size = MAP_SIZE;
 u32 __afl_dictionary_len;
 u64 __afl_map_addr;
 u32 __afl_first_final_loc;
+u32 __afl_old_forkserver;
 
 #ifdef __AFL_CODE_COVERAGE
 typedef struct afl_module_info_t afl_module_info_t;
@@ -366,6 +367,12 @@ static void __afl_map_shm(void) {
 
     }
 
+    if (__afl_debug) {
+
+      fprintf(stderr, "DEBUG: AFL_MAP_SIZE=%u\n", __afl_map_size);
+
+    }
+
     if (__afl_final_loc > MAP_SIZE) {
 
       char *ptr;
@@ -412,7 +419,7 @@ static void __afl_map_shm(void) {
 
     if ((ptr = getenv("AFL_MAP_SIZE")) != NULL) { val = atoi(ptr); }
 
-    if (val > MAP_INITIAL_SIZE) {
+    if (val > MAP_INITIAL_SIZE && val > __afl_final_loc) {
 
       __afl_map_size = val;
 
@@ -616,7 +623,7 @@ static void __afl_map_shm(void) {
     fprintf(stderr,
             "DEBUG: (2) id_str %s, __afl_area_ptr %p, __afl_area_initial %p, "
             "__afl_area_ptr_dummy %p, __afl_map_addr 0x%llx, MAP_SIZE "
-            "%u, __afl_final_loc %u, __afl_map_size %u",
+            "%u, __afl_final_loc %u, __afl_map_size %u\n",
             id_str == NULL ? "<null>" : id_str, __afl_area_ptr,
             __afl_area_initial, __afl_area_ptr_dummy, __afl_map_addr, MAP_SIZE,
             __afl_final_loc, __afl_map_size);
@@ -629,21 +636,21 @@ static void __afl_map_shm(void) {
 
       __afl_area_ptr_dummy = (u8 *)malloc(__afl_map_size);
 
-      if (__afl_area_ptr_dummy) {
+    }
 
-        if (__afl_selective_coverage_start_off) {
+    if (__afl_area_ptr_dummy) {
 
-          __afl_area_ptr = __afl_area_ptr_dummy;
+      if (__afl_selective_coverage_start_off) {
 
-        }
-
-      } else {
-
-        fprintf(stderr, "Error: __afl_selective_coverage failed!\n");
-        __afl_selective_coverage = 0;
-        // continue;
+        __afl_area_ptr = __afl_area_ptr_dummy;
 
       }
+
+    } else {
+
+      fprintf(stderr, "Error: __afl_selective_coverage failed!\n");
+      __afl_selective_coverage = 0;
+      // continue;
 
     }
 
@@ -856,7 +863,7 @@ static void __afl_start_forkserver(void) {
   signal(SIGTERM, at_exit);
 
   u32 already_read_first = 0;
-  u32 was_killed;
+  u32 was_killed = 0;
   u32 version = 0x41464c00 + FS_NEW_VERSION_MAX;
   u32 tmp = version ^ 0xffffffff, status2, status = version;
   u8 *msg = (u8 *)&status;
@@ -866,75 +873,95 @@ static void __afl_start_forkserver(void) {
 
   void (*old_sigchld_handler)(int) = signal(SIGCHLD, SIG_DFL);
 
+  if (getenv("AFL_OLD_FORKSERVER")) {
+
+    __afl_old_forkserver = 1;
+    status = 0;
+
+    if (__afl_final_loc > MAP_SIZE) {
+
+      fprintf(stderr,
+              "Warning: AFL_OLD_FORKSERVER is used with a target compiled with "
+              "non-colliding coverage instead of AFL_LLVM_INSTRUMENT=CLASSIC - "
+              "this target may crash!\n");
+
+    }
+
+  }
+
   /* Phone home and tell the parent that we're OK. If parent isn't there,
      assume we're not running in forkserver mode and just execute program. */
 
-  // return because possible non-forkserver usage
-  if (write(FORKSRV_FD + 1, msg, 4) != 4) { return; }
+  if (!__afl_old_forkserver) {
 
-  if (read(FORKSRV_FD, reply, 4) != 4) { _exit(1); }
-  if (tmp != status2) {
+    // return because possible non-forkserver usage
+    if (write(FORKSRV_FD + 1, msg, 4) != 4) { return; }
 
-    write_error("wrong forkserver message from AFL++ tool");
-    _exit(1);
+    if (read(FORKSRV_FD, reply, 4) != 4) { _exit(1); }
+    if (tmp != status2) {
 
-  }
-
-  // send the set/requested options to forkserver
-  status = FS_NEW_OPT_MAPSIZE;  // we always send the map size
-  if (__afl_sharedmem_fuzzing) { status |= FS_NEW_OPT_SHDMEM_FUZZ; }
-  if (__afl_dictionary_len && __afl_dictionary) {
-
-    status |= FS_NEW_OPT_AUTODICT;
-
-  }
-
-  if (write(FORKSRV_FD + 1, msg, 4) != 4) { _exit(1); }
-
-  // Now send the parameters for the set options, increasing by option number
-
-  // FS_NEW_OPT_MAPSIZE - we always send the map size
-  status = __afl_map_size;
-  if (write(FORKSRV_FD + 1, msg, 4) != 4) { _exit(1); }
-
-  // FS_NEW_OPT_SHDMEM_FUZZ - no data
-
-  // FS_NEW_OPT_AUTODICT - send autodictionary
-  if (__afl_dictionary_len && __afl_dictionary) {
-
-    // pass the dictionary through the forkserver FD
-    u32 len = __afl_dictionary_len, offset = 0;
-
-    if (write(FORKSRV_FD + 1, &len, 4) != 4) {
-
-      write(2, "Error: could not send dictionary len\n",
-            strlen("Error: could not send dictionary len\n"));
+      write_error("wrong forkserver message from AFL++ tool");
       _exit(1);
 
     }
 
-    while (len != 0) {
+    // send the set/requested options to forkserver
+    status = FS_NEW_OPT_MAPSIZE;  // we always send the map size
+    if (__afl_sharedmem_fuzzing) { status |= FS_NEW_OPT_SHDMEM_FUZZ; }
+    if (__afl_dictionary_len && __afl_dictionary) {
 
-      s32 ret;
-      ret = write(FORKSRV_FD + 1, __afl_dictionary + offset, len);
+      status |= FS_NEW_OPT_AUTODICT;
 
-      if (ret < 1) {
+    }
 
-        write_error("could not send dictionary");
+    if (write(FORKSRV_FD + 1, msg, 4) != 4) { _exit(1); }
+
+    // Now send the parameters for the set options, increasing by option number
+
+    // FS_NEW_OPT_MAPSIZE - we always send the map size
+    status = __afl_map_size;
+    if (write(FORKSRV_FD + 1, msg, 4) != 4) { _exit(1); }
+
+    // FS_NEW_OPT_SHDMEM_FUZZ - no data
+
+    // FS_NEW_OPT_AUTODICT - send autodictionary
+    if (__afl_dictionary_len && __afl_dictionary) {
+
+      // pass the dictionary through the forkserver FD
+      u32 len = __afl_dictionary_len, offset = 0;
+
+      if (write(FORKSRV_FD + 1, &len, 4) != 4) {
+
+        write(2, "Error: could not send dictionary len\n",
+              strlen("Error: could not send dictionary len\n"));
         _exit(1);
 
       }
 
-      len -= ret;
-      offset += ret;
+      while (len != 0) {
+
+        s32 ret;
+        ret = write(FORKSRV_FD + 1, __afl_dictionary + offset, len);
+
+        if (ret < 1) {
+
+          write_error("could not send dictionary");
+          _exit(1);
+
+        }
+
+        len -= ret;
+        offset += ret;
+
+      }
 
     }
 
-  }
+    // send welcome message as final message
+    status = version;
+    if (write(FORKSRV_FD + 1, msg, 4) != 4) { _exit(1); }
 
-  // send welcome message as final message
-  status = version;
-  if (write(FORKSRV_FD + 1, msg, 4) != 4) { _exit(1); }
+  }
 
   // END forkserver handshake
 
@@ -948,13 +975,13 @@ static void __afl_start_forkserver(void) {
 
     /* Wait for parent by reading from the pipe. Abort if read fails. */
 
-    if (already_read_first) {
+    if (unlikely(already_read_first)) {
 
       already_read_first = 0;
 
     } else {
 
-      if (read(FORKSRV_FD, &was_killed, 4) != 4) {
+      if (unlikely(read(FORKSRV_FD, &was_killed, 4) != 4)) {
 
         write_error("read from AFL++ tool");
         _exit(1);
@@ -993,10 +1020,10 @@ static void __afl_start_forkserver(void) {
        condition and afl-fuzz already issued SIGKILL, write off the old
        process. */
 
-    if (child_stopped && was_killed) {
+    if (unlikely(child_stopped && was_killed)) {
 
       child_stopped = 0;
-      if (waitpid(child_pid, &status, 0) < 0) {
+      if (unlikely(waitpid(child_pid, &status, 0) < 0)) {
 
         write_error("child_stopped && was_killed");
         _exit(1);
@@ -1005,12 +1032,12 @@ static void __afl_start_forkserver(void) {
 
     }
 
-    if (!child_stopped) {
+    if (unlikely(!child_stopped)) {
 
       /* Once woken up, create a clone of our process. */
 
       child_pid = fork();
-      if (child_pid < 0) {
+      if (unlikely(child_pid < 0)) {
 
         write_error("fork");
         _exit(1);
@@ -1019,7 +1046,7 @@ static void __afl_start_forkserver(void) {
 
       /* In child process: close fds, resume execution. */
 
-      if (!child_pid) {
+      if (unlikely(!child_pid)) {  // just to signal afl-fuzz faster
 
         //(void)nice(-20);
 
@@ -1044,14 +1071,15 @@ static void __afl_start_forkserver(void) {
 
     /* In parent process: write PID to pipe, then wait for child. */
 
-    if (write(FORKSRV_FD + 1, &child_pid, 4) != 4) {
+    if (unlikely(write(FORKSRV_FD + 1, &child_pid, 4) != 4)) {
 
       write_error("write to afl-fuzz");
       _exit(1);
 
     }
 
-    if (waitpid(child_pid, &status, is_persistent ? WUNTRACED : 0) < 0) {
+    if (unlikely(waitpid(child_pid, &status, is_persistent ? WUNTRACED : 0) <
+                 0)) {
 
       write_error("waitpid");
       _exit(1);
@@ -1062,11 +1090,11 @@ static void __afl_start_forkserver(void) {
        a successful run. In this case, we want to wake it up without forking
        again. */
 
-    if (WIFSTOPPED(status)) child_stopped = 1;
+    if (likely(WIFSTOPPED(status))) { child_stopped = 1; }
 
     /* Relay wait status to pipe, then loop back. */
 
-    if (write(FORKSRV_FD + 1, &status, 4) != 4) {
+    if (unlikely(write(FORKSRV_FD + 1, &status, 4) != 4)) {
 
       write_error("writing to afl-fuzz");
       _exit(1);
@@ -1849,7 +1877,7 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
      to avoid duplicate calls (which can happen as an artifact of the underlying
      implementation in LLVM). */
 
-  if (__afl_final_loc < 5) __afl_final_loc = 5;  // we skip the first 5 entries
+  if (__afl_final_loc < 4) __afl_final_loc = 4;  // we skip the first 5 entries
 
   *(start++) = ++__afl_final_loc;
 
@@ -2704,7 +2732,7 @@ void __afl_coverage_skip() {
 // mark this area as especially interesting
 void __afl_coverage_interesting(u8 val, u32 id) {
 
-  __afl_area_ptr[id] = val;
+  __afl_area_ptr[id % __afl_map_size] = val;
 
 }
 

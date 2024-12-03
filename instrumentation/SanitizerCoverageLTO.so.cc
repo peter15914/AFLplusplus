@@ -50,7 +50,11 @@
 #include "llvm/Support/SpecialCaseList.h"
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/Instrumentation.h"
+#if LLVM_VERSION_MAJOR < 20
+  #include "llvm/Transforms/Instrumentation.h"
+#else
+  #include "llvm/Transforms/Utils/Instrumentation.h"
+#endif
 #if LLVM_VERSION_MAJOR < 17
   #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #endif
@@ -214,8 +218,12 @@ class ModuleSanitizerCoverageLTO
 
   void SetNoSanitizeMetadata(Instruction *I) {
 
+#if LLVM_VERSION_MAJOR >= 19
+    I->setNoSanitizeMetadata();
+#else
     I->setMetadata(I->getModule()->getMDKindID("nosanitize"),
                    MDNode::get(*C, None));
+#endif
 
   }
 
@@ -225,7 +233,7 @@ class ModuleSanitizerCoverageLTO
   FunctionCallee SanCovTracePCIndir;
   FunctionCallee SanCovTracePC /*, SanCovTracePCGuard*/;
   Type *IntptrTy, *IntptrPtrTy, *Int64Ty, *Int64PtrTy, *Int32Ty, *Int32PtrTy,
-      *Int16Ty, *Int8Ty, *Int8PtrTy, *Int1Ty, *Int1PtrTy;
+      *Int16Ty, *Int8Ty, *Int8PtrTy, *Int1Ty, *Int1PtrTy, *PtrTy;
   Module           *CurModule;
   std::string       CurModuleUniqueId;
   Triple            TargetTriple;
@@ -341,7 +349,7 @@ llvmGetPassPluginInfo() {
             using OptimizationLevel = typename PassBuilder::OptimizationLevel;
 #endif
 #if LLVM_VERSION_MAJOR >= 15
-            PB.registerFullLinkTimeOptimizationEarlyEPCallback(
+            PB.registerFullLinkTimeOptimizationLastEPCallback(
 #else
             PB.registerOptimizerLastEPCallback(
 #endif
@@ -416,6 +424,7 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
   Int16Ty = IRB.getInt16Ty();
   Int8Ty = IRB.getInt8Ty();
   Int1Ty = IRB.getInt1Ty();
+  PtrTy = PointerType::getUnqual(*C);
 
   /* AFL++ START */
   char        *ptr;
@@ -486,7 +495,7 @@ bool ModuleSanitizerCoverageLTO::instrumentModule(
   if ((ptr = getenv("AFL_LLVM_DOCUMENT_IDS")) != NULL) {
 
     dFile.open(ptr, std::ofstream::out | std::ofstream::app);
-    if (dFile.is_open()) WARNF("Cannot access document file %s", ptr);
+    if (!dFile.is_open()) WARNF("Cannot access document file %s", ptr);
 
   }
 
@@ -1350,7 +1359,7 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
     Function &F, DomTreeCallback DTCallback, PostDomTreeCallback PDTCallback) {
 
   if (F.empty()) return;
-  if (F.getName().find(".module_ctor") != std::string::npos)
+  if (F.getName().contains(".module_ctor"))
     return;  // Should not instrument sanitizer init functions.
 #if LLVM_VERSION_MAJOR >= 18
   if (F.getName().starts_with("__sanitizer_"))
@@ -1372,6 +1381,10 @@ void ModuleSanitizerCoverageLTO::instrumentFunction(
   if (F.hasPersonalityFn() &&
       isAsynchronousEHPersonality(classifyEHPersonality(F.getPersonalityFn())))
     return;
+  if (F.hasFnAttribute(Attribute::NoSanitizeCoverage)) return;
+#if LLVM_VERSION_MAJOR >= 19
+  if (F.hasFnAttribute(Attribute::DisableSanitizerInstrumentation)) return;
+#endif
   // if (Allowlist && !Allowlist->inSection("coverage", "fun", F.getName()))
   //  return;
   // if (Blocklist && Blocklist->inSection("coverage", "fun", F.getName()))
@@ -2023,16 +2036,20 @@ GlobalVariable *ModuleSanitizerCoverageLTO::CreatePCArray(
 
     if (&F.getEntryBlock() == AllBlocks[i]) {
 
-      PCs.push_back((Constant *)IRB.CreatePointerCast(&F, IntptrPtrTy));
-      PCs.push_back((Constant *)IRB.CreateIntToPtr(
-          ConstantInt::get(IntptrTy, 1), IntptrPtrTy));
+      PCs.push_back((Constant *)IRB.CreatePointerCast(&F, PtrTy));
+      PCs.push_back(
+          (Constant *)IRB.CreateIntToPtr(ConstantInt::get(IntptrTy, 1), PtrTy));
 
     } else {
 
       PCs.push_back((Constant *)IRB.CreatePointerCast(
-          BlockAddress::get(AllBlocks[i]), IntptrPtrTy));
-      PCs.push_back((Constant *)IRB.CreateIntToPtr(
-          ConstantInt::get(IntptrTy, 0), IntptrPtrTy));
+          BlockAddress::get(AllBlocks[i]), PtrTy));
+#if LLVM_VERSION_MAJOR >= 16
+      PCs.push_back(Constant::getNullValue(PtrTy));
+#else
+      PCs.push_back(
+          (Constant *)IRB.CreateIntToPtr(ConstantInt::get(IntptrTy, 0), PtrTy));
+#endif
 
     }
 

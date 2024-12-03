@@ -2,6 +2,8 @@
 
 ## Must
 
+ - ijon support?
+ - check for null ptr for xml/curl/g_ string transform functions
  - hardened_usercopy=0 page_alloc.shuffle=0
  - add value_profile but only enable after 15 minutes without finds
  - cmplog max items env?
@@ -16,6 +18,7 @@
 ## Should
 
  - afl-crash-analysis
+ - cmplog: add loop count resolving (byte -> loop cnt change, calc special values)
  - support persistent and deferred fork server in afl-showmap?
  - better autodetection of shifting runtime timeout values
  - afl-plot to support multiple plot_data

@@ -1,7 +1,7 @@
 /*
  * Copyright 2016 laf-intel
- * extended for floating point by Heiko Eißfeldt
- * adapted to new pass manager by Heiko Eißfeldt
+ * extended for floating point by Heiko Eissfeldt
+ * adapted to new pass manager by Heiko Eissfeldt
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -266,8 +266,11 @@ bool SplitComparesTransform::simplifyFPCompares(Module &M) {
 
             /* this is probably not needed but we do it anyway */
             if (TyOp0 != TyOp1) { continue; }
-
             if (TyOp0->isArrayTy() || TyOp0->isVectorTy()) { continue; }
+            int constants = 0;
+            if (llvm::isa<llvm::Constant>(op0)) { ++constants; }
+            if (llvm::isa<llvm::Constant>(op1)) { ++constants; }
+            if (constants != 1) { continue; }
 
             fcomps.push_back(selectcmpInst);
 
@@ -1778,7 +1781,13 @@ bool SplitComparesTransform::runOnModule(Module &M) {
 
             auto op0 = CI->getOperand(0);
             auto op1 = CI->getOperand(1);
+            // has to valid operands
             if (!op0 || !op1) { continue; }
+            // has exactly one constant and one variable
+            int constants = 0;
+            if (dyn_cast<ConstantInt>(op0)) { ++constants; }
+            if (dyn_cast<ConstantInt>(op1)) { ++constants; }
+            if (constants != 1) { continue; }
 
             auto iTy1 = dyn_cast<IntegerType>(op0->getType());
             if (iTy1 && isa<IntegerType>(op1->getType())) {

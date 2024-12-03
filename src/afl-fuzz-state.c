@@ -5,7 +5,7 @@
    Originally written by Michal Zalewski
 
    Now maintained by Marc Heuse <mh@mh-sec.de>,
-                        Heiko Eißfeldt <heiko.eissfeldt@hexco.de> and
+                        Heiko Eissfeldt <heiko.eissfeldt@hexco.de> and
                         Andrea Fioraldi <andreafioraldi@gmail.com>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
@@ -279,6 +279,20 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
             afl->afl_env.afl_final_sync =
                 get_afl_env(afl_environment_variables[i]) ? 1 : 0;
 
+          } else if (!strncmp(env, "AFL_NO_SYNC",
+
+                              afl_environment_variable_len)) {
+
+            afl->afl_env.afl_no_sync =
+                get_afl_env(afl_environment_variables[i]) ? 1 : 0;
+
+          } else if (!strncmp(env, "AFL_NO_FASTRESUME",
+
+                              afl_environment_variable_len)) {
+
+            afl->afl_env.afl_no_fastresume =
+                get_afl_env(afl_environment_variables[i]) ? 1 : 0;
+
           } else if (!strncmp(env, "AFL_CUSTOM_MUTATOR_ONLY",
 
                               afl_environment_variable_len)) {
@@ -286,11 +300,28 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
             afl->afl_env.afl_custom_mutator_only =
                 get_afl_env(afl_environment_variables[i]) ? 1 : 0;
 
+          } else if (!strncmp(env, "AFL_CUSTOM_MUTATOR_LATE_SEND",
+
+                              afl_environment_variable_len)) {
+
+            afl->afl_env.afl_custom_mutator_late_send =
+                get_afl_env(afl_environment_variables[i]) ? 1 : 0;
+
           } else if (!strncmp(env, "AFL_CMPLOG_ONLY_NEW",
 
                               afl_environment_variable_len)) {
 
             afl->afl_env.afl_cmplog_only_new =
+                get_afl_env(afl_environment_variables[i]) ? 1 : 0;
+
+          } else if (!strncmp(env, "AFL_DISABLE_REDUNDANT",
+
+                              afl_environment_variable_len) ||
+                     !strncmp(env, "AFL_NO_REDUNDANT",
+
+                              afl_environment_variable_len)) {
+
+            afl->afl_env.afl_disable_redundant =
                 get_afl_env(afl_environment_variables[i]) ? 1 : 0;
 
           } else if (!strncmp(env, "AFL_NO_STARTUP_CALIBRATION",
@@ -619,6 +650,13 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
 
             }
 
+          } else if (!strncmp(env, "AFL_SHA1_FILENAMES",
+
+                              afl_environment_variable_len)) {
+
+            afl->afl_env.afl_sha1_filenames =
+                get_afl_env(afl_environment_variables[i]) ? 1 : 0;
+
           }
 
         } else {
@@ -745,8 +783,9 @@ void afl_states_stop(void) {
     if (el->fsrv.fsrv_pid > 0) {
 
       kill(el->fsrv.fsrv_pid, el->fsrv.fsrv_kill_signal);
+      usleep(100);
       /* Make sure the forkserver does not end up as zombie. */
-      waitpid(el->fsrv.fsrv_pid, NULL, 0);
+      waitpid(el->fsrv.fsrv_pid, NULL, WNOHANG);
 
     }
 

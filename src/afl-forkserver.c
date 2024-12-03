@@ -7,7 +7,7 @@
    Forkserver design by Jann Horn <jannhorn@googlemail.com>
 
    Now maintained by Marc Heuse <mh@mh-sec.de>,
-                        Heiko Eißfeldt <heiko.eissfeldt@hexco.de> and
+                        Heiko Eissfeldt <heiko.eissfeldt@hexco.de> and
                         Andrea Fioraldi <andreafioraldi@gmail.com> and
                         Dominik Maier <mail@dmnk.co>
 
@@ -27,6 +27,9 @@
  */
 
 #include "config.h"
+#ifdef AFL_PERSISTENT_RECORD
+  #include "afl-fuzz.h"
+#endif
 #include "types.h"
 #include "debug.h"
 #include "common.h"
@@ -133,6 +136,12 @@ nyx_plugin_handler_t *afl_load_libnyx_plugin(u8 *libnyx_binary) {
       dlsym(handle, "nyx_config_set_aux_buffer_size");
   if (plugin->nyx_config_set_aux_buffer_size == NULL) { goto fail; }
 
+  plugin->nyx_get_target_hash64 = dlsym(handle, "nyx_get_target_hash64");
+  if (plugin->nyx_get_target_hash64 == NULL) { goto fail; }
+
+  plugin->nyx_config_free = dlsym(handle, "nyx_config_free");
+  if (plugin->nyx_get_target_hash64 == NULL) { goto fail; }
+
   OKF("libnyx plugin is ready!");
   return plugin;
 
@@ -221,6 +230,7 @@ void afl_fsrv_init(afl_forkserver_t *fsrv) {
   fsrv->nyx_use_tmp_workdir = false;
   fsrv->nyx_tmp_workdir_path = NULL;
   fsrv->nyx_log_fd = -1;
+  fsrv->nyx_target_hash64 = 0;
 #endif
 
   // this structure needs default so we initialize it if this was not done
@@ -238,6 +248,7 @@ void afl_fsrv_init(afl_forkserver_t *fsrv) {
   fsrv->mem_limit = MEM_LIMIT;
   fsrv->out_file = NULL;
   fsrv->child_kill_signal = SIGKILL;
+  fsrv->max_length = MAX_FILE;
 
   /* exec related stuff */
   fsrv->child_pid = -1;
@@ -248,6 +259,10 @@ void afl_fsrv_init(afl_forkserver_t *fsrv) {
   fsrv->debug = false;
   fsrv->uses_crash_exitcode = false;
   fsrv->uses_asan = false;
+
+#ifdef __AFL_CODE_COVERAGE
+  fsrv->persistent_trace_bits = NULL;
+#endif
 
   fsrv->init_child_func = fsrv_exec_child;
   list_append(&fsrv_list, fsrv);
@@ -275,11 +290,18 @@ void afl_fsrv_init_dup(afl_forkserver_t *fsrv_to, afl_forkserver_t *from) {
   fsrv_to->fsrv_kill_signal = from->fsrv_kill_signal;
   fsrv_to->debug = from->debug;
 
+#ifdef __AFL_CODE_COVERAGE
+  fsrv_to->persistent_trace_bits = from->persistent_trace_bits;
+#endif
+
   // These are forkserver specific.
   fsrv_to->out_dir_fd = -1;
   fsrv_to->child_pid = -1;
   fsrv_to->use_fauxsrv = 0;
   fsrv_to->last_run_timed_out = 0;
+
+  fsrv_to->late_send = from->late_send;
+  fsrv_to->custom_data_ptr = from->custom_data_ptr;
 
   fsrv_to->init_child_func = from->init_child_func;
   // Note: do not copy ->add_extra_func or ->persistent_record*
@@ -292,8 +314,8 @@ void afl_fsrv_init_dup(afl_forkserver_t *fsrv_to, afl_forkserver_t *from) {
   Returns the time passed to read.
   If the wait times out, returns timeout_ms + 1;
   Returns 0 if an error occurred (fd closed, signal, ...); */
-static u32 __attribute__((hot))
-read_s32_timed(s32 fd, s32 *buf, u32 timeout_ms, volatile u8 *stop_soon_p) {
+static u32 __attribute__((hot)) read_s32_timed(s32 fd, s32 *buf, u32 timeout_ms,
+                                               volatile u8 *stop_soon_p) {
 
   fd_set readfds;
   FD_ZERO(&readfds);
@@ -473,9 +495,9 @@ static void report_error_and_exit(int error) {
       FATAL(
           "AFL_MAP_SIZE is not set and fuzzing target reports that the "
           "required size is very large. Solution: Run the fuzzing target "
-          "stand-alone with the environment variable AFL_DEBUG=1 set and set "
-          "the value for __afl_final_loc in the AFL_MAP_SIZE environment "
-          "variable for afl-fuzz.");
+          "stand-alone with the environment variable AFL_DUMP_MAP_SIZE=1 set "
+          "the displayed value in the AFL_MAP_SIZE environment variable for "
+          "afl-fuzz.");
       break;
     case FS_ERROR_MAP_ADDR:
       FATAL(
@@ -512,13 +534,25 @@ static void report_error_and_exit(int error) {
 
 }
 
+#ifdef __linux__
+void nyx_load_target_hash(afl_forkserver_t *fsrv) {
+
+  void *nyx_config = fsrv->nyx_handlers->nyx_config_load(fsrv->target_path);
+  fsrv->nyx_target_hash64 =
+      fsrv->nyx_handlers->nyx_get_target_hash64(nyx_config);
+  fsrv->nyx_handlers->nyx_config_free(nyx_config);
+
+}
+
+#endif
+
 /* Spins up fork server. The idea is explained here:
 
    https://lcamtuf.blogspot.com/2014/10/fuzzing-binaries-without-execve.html
 
    In essence, the instrumentation allows us to skip execve(), and just keep
    cloning a stopped child. So, we just execute once, and then send commands
-   through a pipe. The other part of this logic is in afl-as.h / llvm_mode */
+   through a pipe. The other part of this logic is in afl-compilter-rt.o */
 
 void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
                     volatile u8 *stop_soon_p, u8 debug_child_output) {
@@ -575,7 +609,8 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
     void *nyx_config = fsrv->nyx_handlers->nyx_config_load(fsrv->target_path);
 
     fsrv->nyx_handlers->nyx_config_set_workdir_path(nyx_config, workdir_path);
-    fsrv->nyx_handlers->nyx_config_set_input_buffer_size(nyx_config, MAX_FILE);
+    fsrv->nyx_handlers->nyx_config_set_input_buffer_size(nyx_config,
+                                                         fsrv->max_length);
     fsrv->nyx_handlers->nyx_config_set_input_buffer_write_protection(nyx_config,
                                                                      true);
 
@@ -1322,6 +1357,10 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
 
           fsrv->map_size = tmp_map_size;
 
+        } else {
+
+          fsrv->real_map_size = fsrv->map_size = MAP_SIZE;
+
         }
 
         if ((status & FS_OPT_AUTODICT) == FS_OPT_AUTODICT) {
@@ -1427,6 +1466,12 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
           }
 
         }
+
+      } else {
+
+        // The binary is most likely instrumented using AFL's tool, and we will
+        // set map_size to MAP_SIZE.
+        fsrv->real_map_size = fsrv->map_size = MAP_SIZE;
 
       }
 
@@ -1651,7 +1696,8 @@ void afl_fsrv_kill(afl_forkserver_t *fsrv) {
   if (fsrv->fsrv_pid > 0) {
 
     kill(fsrv->fsrv_pid, fsrv->fsrv_kill_signal);
-    waitpid(fsrv->fsrv_pid, NULL, 0);
+    usleep(25);
+    waitpid(fsrv->fsrv_pid, NULL, WNOHANG);
 
   }
 
@@ -1678,8 +1724,8 @@ u32 afl_fsrv_get_mapsize(afl_forkserver_t *fsrv, char **argv,
 
 /* Delete the current testcase and write the buf to the testcase file */
 
-void __attribute__((hot))
-afl_fsrv_write_to_testcase(afl_forkserver_t *fsrv, u8 *buf, size_t len) {
+void __attribute__((hot)) afl_fsrv_write_to_testcase(afl_forkserver_t *fsrv,
+                                                     u8 *buf, size_t len) {
 
 #ifdef __linux__
   if (unlikely(fsrv->nyx_mode)) {
@@ -1797,9 +1843,8 @@ afl_fsrv_write_to_testcase(afl_forkserver_t *fsrv, u8 *buf, size_t len) {
 /* Execute target application, monitoring for timeouts. Return status
    information. The called program will update afl->fsrv->trace_bits. */
 
-fsrv_run_result_t __attribute__((hot))
-afl_fsrv_run_target(afl_forkserver_t *fsrv, u32 timeout,
-                    volatile u8 *stop_soon_p) {
+fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
+    afl_forkserver_t *fsrv, u32 timeout, volatile u8 *stop_soon_p) {
 
   s32 res;
   u32 exec_ms;
@@ -1936,6 +1981,13 @@ afl_fsrv_run_target(afl_forkserver_t *fsrv, u32 timeout,
           "shared memory available).");
 
     FATAL("Fork server is misbehaving (OOM?)");
+
+  }
+
+  if (unlikely(fsrv->late_send)) {
+
+    fsrv->late_send(fsrv->custom_data_ptr, fsrv->custom_input,
+                    fsrv->custom_input_len);
 
   }
 
@@ -2078,10 +2130,13 @@ store_persistent_record: {
     u32 len = fsrv->persistent_record_len[entry];
     if (likely(len && data)) {
 
-      snprintf(fn, sizeof(fn), persistent_out_fmt, fsrv->persistent_record_dir,
-               fsrv->persistent_record_cnt, writecnt++,
-               afl->file_extension ? "." : "",
-               afl->file_extension ? (const char *)afl->file_extension : "");
+      snprintf(
+          fn, sizeof(fn), persistent_out_fmt, fsrv->persistent_record_dir,
+          fsrv->persistent_record_cnt, writecnt++,
+          ((afl_state_t *)(fsrv->afl_ptr))->file_extension ? "." : "",
+          ((afl_state_t *)(fsrv->afl_ptr))->file_extension
+              ? (const char *)((afl_state_t *)(fsrv->afl_ptr))->file_extension
+              : "");
       int fd = open(fn, O_CREAT | O_TRUNC | O_WRONLY, 0644);
       if (fd >= 0) {
 
